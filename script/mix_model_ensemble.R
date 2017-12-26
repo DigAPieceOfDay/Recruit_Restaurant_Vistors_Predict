@@ -5,6 +5,7 @@ library(zoo)
 library(lubridate)
 library(dummies)
 library(geosphere)
+library(caret)
 library(xgboost)
 
 
@@ -387,7 +388,6 @@ d1 <- xgb.DMatrix(
   label = y1
 )
 
-# set parameters 
 param <- list(
   "objective" = "reg:linear",
   "eta" = 0.1,
@@ -439,30 +439,47 @@ x1 <- x_test
 
 y0 <- x0$visitors
 
-x0$visit_date <- x0$air_store_id <- x0$visitors <-  NULL
-x1$visit_date <- x1$air_store_id <- x1$visitors <-  NULL
-
-d0 <- xgb.DMatrix(
-  data.matrix(x0),
-  label = y0
-)
+x0$visit_date <- x0$air_store_id <- x0$visitors <- NULL
+x1$visit_date <- x1$air_store_id <- x1$visitors <- NULL
 
 
-bst <- xgboost(
-  params = param,
-  data = d0,
-  metrics = "rmse",
-  nrounds = best_iteration
-)
+# cross validation for full data
+folds <- createFolds(y0, k = 4)
+pre_cv <- data.frame(id = id)
 
-# predict 
-pred_full <- predict(bst, data.matrix(x1))
+for(i in 1:4){  
+  traindata <- xgb.DMatrix(
+    data.matrix(x0[-folds[[i]],]),
+    lable = y0[-folds[[i]],]
+  )
+  
+  testdata <- xgb.DMatrix(
+    data.matrix(x0[folds[[i]],]),
+    lable = y0[folds[[i]],]
+  )  
+  
+  bst <- xgboost(
+    params = param,
+    data = traindata,
+    metrics = "rmse",
+    nrounds = best_iteration
+  )
+  
+  # predict testdata
+  pred_cv[,i] <- predict(bst,testdata)
+  
+}
+
+
+
+
+
 result_xgb <- data.frame(
   id = paste(xtest$air_store_id, x_test$visit_date , sep = '_'),
   visitors = expm1(pred_full)
 )
 
-# ---------------------------Lightgbm Model ------------------------------
+# --------------------------- Lightgbm Model ------------------------------
 library(lightgbm)
 
 ## lgbm - validation ----
@@ -477,17 +494,15 @@ y1 <- x1$visitors
 x0$visit_date <- x0$air_store_id <- x0$visitors <- NULL
 x1$visit_date <- x1$air_store_id <- x1$visitors <- NULL
 
-cat_features <- c('air_genre_name', 'air_area_name')
+# cat_features <- c('air_genre_name', 'air_area_name')
 d0 <- lgb.Dataset(
   as.matrix(x0),
   label = y0,
-  categorical_feature = cat_features,
   free_raw_data = TRUE
 )
 d1 <- lgb.Dataset(
   as.matrix(x1),
   label = y1,
-  categorical_feature = cat_features,
   free_raw_data = TRUE
 )
 
@@ -532,26 +547,13 @@ y0 <- x0$visitors
 x0$visit_date <- x0$air_store_id <- x0$visitors <- NULL
 x1$visit_date <- x1$air_store_id <- x1$visitors <- NULL
 
-cat_features <- c('air_genre_name', 'air_area_name')
+# cat_features <- c('air_genre_name', 'air_area_name')
 d0 <- lgb.Dataset(
   as.matrix(x0),
   label = y0,
-  categorical_feature = cat_features,
   free_raw_data = FALSE
 )
 
-# set params
-params <- list(
-  objective = 'regression',
-  metric = 'rmse',
-  max_depth = 7,
-  feature_fraction = 0.7,
-  bagging_fraction = 0.8,
-  min_data_in_leaf = 30,
-  learning_rate = 0.02,
-  num_threads = 4,
-  weight = 'wgt'
-)
 
 model <- lgb.train(params = params,  data = d0, nrounds = ntrx)
 pred_full <- predict(model, as.matrix(x1))
@@ -561,6 +563,15 @@ result_lightbgm <- data.frame(
   id = id,
   visitors = expm1(pred_full)
 )
+
+
+
+# MERGE TWO MODEL PREDICT RESULT
+result1 <- data.frame(
+  id = id,
+  visitors = (result_xgb$visitors + result_lightbgm$visitors)/2
+)
+
 
 
 # ---------------------------- RandomForest Model ------------------------------
@@ -724,8 +735,8 @@ sample_submission[missings][['visitors']] <- merge(
 
 # transform visitors
 sample_submission[, 'visitors' := expm1(visitors)]
-result3 <- sample_submission[,c("id","visitors")]
-result3 <- result3[order(result3$id),]
+result2 <- sample_submission[,c("id","visitors")]
+result2 <- result2[order(result2$id),]
 
 # remove temp variable
 rm(visitors,visit_data,sample_submission)
@@ -734,16 +745,16 @@ rm(visitors,visit_data,sample_submission)
 # merge solution1 and solution2
 sample_submission_last <- data.table(
   id = id,
-  vis2 = result1$visitors,
-  vis3 = result2$visitors
+  vis1 = result1$visitors,
+  vis2 = result2$visitors
 )
-sample_submission_last[, "visitors" := (vis2 + vis3 * 1.1) / 2]
-sample_submission_last[, c("vis2", "vis3") := NULL]
+sample_submission_last[, "visitors" := (vis1 + vis2 * 1.1) / 2]
+sample_submission_last[, c("vis1", "vis2") := NULL]
 
 # Create csv submission file
 write.csv(
   sample_submission_last,
-  paste0("./output/submission/mix_ensemble_surprieme_",Sys.Date(),".csv"), 
+  paste0("./output/submission/mix_ensemble_",Sys.Date(),".csv"), 
   row.names = FALSE,
   quote = F
 )
@@ -752,8 +763,4 @@ write.csv(
 save.image("./output/save/mix_model_ensemble.RData")
 
 
-# 2017-12-20 0.500 (add new feature)
-# 2017-12-22 0.501  (create dummy variable)
-
-# 2017-12-23 0.495 (new parameter)
-# 2017-12-24 0.494 (add new feature)
+# 2017-12-26   (ensemble -- xgb and lightgm)
