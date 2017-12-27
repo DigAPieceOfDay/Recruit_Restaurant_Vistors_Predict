@@ -32,6 +32,30 @@ store_id <- fread("./data/store_id_relation.csv")
 
 
 ## weather data ---
+weather_station <- fread("./data/weather_info/weather_stations.csv")
+
+air_store_info_u <-
+  fread("./data/weather_info/air_store_info_with_nearest_station.csv",
+        encoding = "UTF-8")
+
+hpg_store_info_u <-
+  fread("./data/weather_info/hpg_store_info_with_nearest_station.csv",
+        encoding = "UTF-8")
+
+weater_files <- list.files(
+  path = "./data/weather_info/1-1-16_5-31-17_Weather_Translated",
+  pattern = "*.csv",
+  full.names = TRUE
+)
+
+weather_dt <- do.call(rbindlist, list(lapply(weater_files, fread)))
+
+
+
+
+
+
+
 
 
 
