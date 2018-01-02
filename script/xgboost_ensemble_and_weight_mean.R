@@ -98,6 +98,11 @@ xtrain$dow <- wday(xtrain$visit_date)
 xtrain$year <- year(xtrain$visit_date)
 xtrain$month <- month(xtrain$visit_date)
 
+# Calculate number of “restaurant days”
+xtrain$golden_diff <-
+  as.numeric(xtrain$visit_date - as.Date('2016-04-29', '%Y-%m-%d'))
+xtrain$golden_diff <- floor((xtrain$golden_diff + 700) / 7.0) - 100
+
 
 ### xtest data clean ----
 xtest$air_store_id <- str_sub(xtest$id, 1,-12)
@@ -108,6 +113,11 @@ xtest$dow <- wday(xtest$visit_date)
 xtest$year <- year(xtest$visit_date)
 xtest$month <- month(xtest$visit_date)
 
+xtest$golden_diff <- 
+  as.numeric(xtest$visit_date - as.Date('2017-04-29', '%Y-%m-%d'))
+xtest$golden_diff <- floor((xtest$golden_diff + 700) / 7.0) - 100
+
+
 unique_stores <- unique(xtest$air_store_id)
 stores <- data.frame(
   air_store_id = unique_stores,
@@ -116,20 +126,18 @@ stores <- data.frame(
 
 ### stores data clean ---- 
 # sure it can be compressed...
-tmp <- xtrain[,.(min_vis = min(visitors)) ,by = list(air_store_id, dow)]
+tmp <- xtrain[,.(
+  min_vis = min(visitors),
+  max_vis = max(visitors),
+  mean_vis = mean(visitors),
+  median_vis = median(visitors)
+),
+by = list(air_store_id, dow)]
 stores <- merge(stores,tmp)
 
-tmp <- xtrain[,.(max_vis = max(visitors)) ,by = list(air_store_id, dow)]
-stores <- merge(stores,tmp)
-
-tmp <- xtrain[,.(mean_vis = mean(visitors)) ,by = list(air_store_id, dow)]
-stores <- merge(stores,tmp)
-
-tmp <- xtrain[,.(median_vis = median(visitors)) ,by = list(air_store_id, dow)]
-stores <- merge(stores,tmp)
-
-tmp <- xtrain[,.(sum_vis = sum(visitors)) ,by = list(air_store_id, dow)]
-stores <- merge(stores,tmp)
+# merge stores and store_air
+stores <- merge(stores,xstore_air)
+rm(tmp)
 
 # merge stores and store_air
 stores <- merge(stores,xstore_air)
@@ -154,7 +162,7 @@ stores$air_genre_name <- as.integer(stores$air_genre_name)
 stores <- data.table(cbind(stores,air_genre_name_dum))
 stores[, c("air_genre_name") := NULL]
 
-# rm(air_genre_name_dum)
+rm(air_genre_name_dum)
 
 ### date_info clean ---
 # holidays at weekends are not special, right?
@@ -342,10 +350,11 @@ x_test <- train[visitors == 0]
 
 # -------------------------BUILD XGBOOST MODEL----------------------------
 ## xgboost - validation ----
-# x0 <- x_train[visit_date <= '2016-04-22' & visit_date >= '2016-01-01']
-# x1 <- x_train[visit_date <= '2016-05-31' & visit_date >= '2016-04-29']
-x0 <- x_train[visit_date <= '2017-03-09' & visit_date > '2016-04-01']
-x1 <- x_train[visit_date > '2017-03-09']
+x0 <- x_train[visit_date <= '2016-04-22' & visit_date >= '2016-01-01']
+x1 <- x_train[visit_date <= '2016-05-31' & visit_date >= '2016-04-29']
+
+# x0 <- x_train[visit_date <= '2017-03-09' & visit_date > '2016-04-01']
+# x1 <- x_train[visit_date > '2017-03-09']
 
 
 # y0 -> train vistors,y1 -> validate vistors

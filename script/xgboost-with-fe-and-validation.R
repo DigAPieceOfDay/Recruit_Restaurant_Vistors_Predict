@@ -118,7 +118,7 @@ xtrain[,day_of_week := NULL]
 xtrain[,weight := NULL]
 rm(res_air_agg, xstore, xdate)
 
-## ----------------------------Feature Engineer---------------------------
+## ----------------------------- Feature Engineer ---------------------------
 # 1.holiday in the last 3 days
 xtrain[, h3a := rollapply(
   holiday_flg,

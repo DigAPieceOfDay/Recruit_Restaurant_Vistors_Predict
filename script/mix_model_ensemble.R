@@ -32,11 +32,6 @@ xdate <- fread('./data/date_info.csv')
 store_id <- fread("./data/store_id_relation.csv")
 
 
-## weather data ---
-
-
-
-
 # ---------------------------------DATA CLEAN------------------------------------
 # merge reserve and store
 reserve_hpg <- merge(reserve_hpg, store_id)
@@ -104,6 +99,11 @@ xtrain$dow <- wday(xtrain$visit_date)
 xtrain$year <- year(xtrain$visit_date)
 xtrain$month <- month(xtrain$visit_date)
 
+# Calculate number of “restaurant days”
+xtrain$golden_diff <-
+  as.numeric(xtrain$visit_date - as.Date('2016-04-29', '%Y-%m-%d'))
+xtrain$golden_diff <- floor((xtrain$golden_diff + 700) / 7.0) - 100
+
 
 ### xtest data clean ----
 xtest$air_store_id <- str_sub(xtest$id, 1,-12)
@@ -114,6 +114,10 @@ xtest$dow <- wday(xtest$visit_date)
 xtest$year <- year(xtest$visit_date)
 xtest$month <- month(xtest$visit_date)
 
+xtest$golden_diff <- 
+  as.numeric(xtest$visit_date - as.Date('2017-04-29', '%Y-%m-%d'))
+xtest$golden_diff <- floor((xtest$golden_diff + 700) / 7.0) - 100
+
 unique_stores <- unique(xtest$air_store_id)
 stores <- data.frame(
   air_store_id = unique_stores,
@@ -122,20 +126,15 @@ stores <- data.frame(
 
 # stores data clean ----
 # sure it can be compressed...
-tmp <- xtrain[,.(min_vis = min(visitors)) ,by = list(air_store_id, dow)]
+tmp <- xtrain[,.(
+  min_vis = min(visitors),
+  max_vis = max(visitors),
+  mean_vis = mean(visitors),
+  median_vis = median(visitors)
+),
+by = list(air_store_id, dow)]
 stores <- merge(stores,tmp)
 
-tmp <- xtrain[,.(max_vis = max(visitors)) ,by = list(air_store_id, dow)]
-stores <- merge(stores,tmp)
-
-tmp <- xtrain[,.(mean_vis = mean(visitors)) ,by = list(air_store_id, dow)]
-stores <- merge(stores,tmp)
-
-tmp <- xtrain[,.(median_vis = median(visitors)) ,by = list(air_store_id, dow)]
-stores <- merge(stores,tmp)
-
-tmp <- xtrain[,.(sum_vis = sum(visitors)) ,by = list(air_store_id, dow)]
-stores <- merge(stores,tmp)
 
 # merge stores and store_air
 stores <- merge(stores,xstore_air)
@@ -144,23 +143,11 @@ rm(tmp)
 # set air_genre_name/air_area_name to factor and then to interger
 stores$air_genre_name <- factor(stores$air_genre_name)
 levels(stores$air_genre_name) <- 1:nlevels(stores$air_genre_name)
+stores$air_genre_name <- as.integer(stores$air_genre_name)
 
 stores$air_area_name <- factor(stores$air_area_name)
 levels(stores$air_area_name) <- 1:nlevels(stores$air_area_name)
 stores$air_area_name <- as.integer(stores$air_area_name)
-
-# transform category var to dummy variable
-air_genre_name_dum <- dummy(stores$air_genre_name)
-stores$air_genre_name <- as.integer(stores$air_genre_name)
-
-# air_area_name_dum <- dummy(stores$air_area_name)
-# stores$air_area_name <- as.integer(stores$air_area_name)
-
-# combine air_genre_name_dum、air_area_name_dum and stores
-stores <- data.table(cbind(stores,air_genre_name_dum))
-stores[, c("air_genre_name") := NULL]
-
-rm(air_genre_name_dum)
 
 
 ### date_info clean ---
@@ -172,7 +159,7 @@ wkend_holidays <- which(
 xdate[wkend_holidays, 'holiday_flg' := 0]
 
 # add decreasing weights from now
-xdate[, 'weight' := (.I/.N) ^ 7]
+# xdate[, 'weight' := (.I/.N) ^ 7]
 xdate$calendar_date <- as.Date(xdate$calendar_date)
 
 
@@ -207,24 +194,20 @@ train[,"var_max_long"] <- max(train$longitude) - train$longitude
 # NEW FEATURES FROM Georgii Vyshnia
 train[,"lon_plus_lat"] <- train$longitude + train$latitude
 
+# train$air_store_id_int <- factor(train$air_area_name)
+# levels(train$air_store_id_int) <- 1:nlevels(train$air_store_id_int)
+# train$air_store_id_int <- as.integer(train$air_store_id_int)
 
 # COMPUTE DISTANCE BY LONGTITUDE/LATITUDE
 others <- cbind(train$longitude,train$latitude)
 center <- cbind(mean(train$longitude),mean(train$latitude))
-dist <- distm(others,center)
-train[,"dist"] <- dist
-
-rm(others,center,dist)
+train[,"dist"] <- distm(others,center)
+rm(others,center)
 
 # it decreases the importance of the further past data by applying 
 # a weight to them
 train[, 'visitors':= log1p(visitors)]
-train[,.(visitors = weighted.mean(visitors, weight)), 
-      by = c('air_store_id', 'day_of_week', 'holiday_flg')]
-
-# delete day_of_week、weight
 train[,day_of_week := NULL]
-train[,weight := NULL]
 
 
 ## -----------------------------Feature Engineer 2-------------------------------
@@ -346,30 +329,15 @@ by = c('air_store_id')]
 x_train <- train[visitors > 0]
 x_test <- train[visitors == 0]
 
-
-
-# --------------------------------FEATURE SELECT---------------------------------
-library(Boruta)
-
-set.seed(10)
-borutaAttr <- Boruta(
-  visitors ~ . - (air_store_id + visit_date),
-  data = x_train,
-  maxRuns = 20,
-  doTrace = 0
-)
-
-borutaVars <- getSelectedAttributes(borutaAttr)
-boruta.formula <- formula(
-  paste("visitors ~ ",paste(borutaVars, collapse = " + "))
-)
-
-
-
 # ----------------------------- XGBOOST MODEL-----------------------------
 ## xgboost - validation ----
+
+# x0 <- x_train[visit_date <= '2016-04-22' & visit_date >= '2016-01-01']
+# x1 <- x_train[visit_date <= '2016-05-31' & visit_date >= '2016-04-29']
+
 x0 <- x_train[visit_date <= '2017-03-09' & visit_date > '2016-04-01']
 x1 <- x_train[visit_date > '2017-03-09']
+
 
 # y0 -> train vistors,y1 -> validate vistors
 y0 <- x0$visitors
@@ -393,7 +361,7 @@ param <- list(
   "eta" = 0.1,
   "max_depth" = 8,
   "subsample" = 0.886,
-  'min_child_weight' = 30,
+  'min_child_weight' = 10,
   "colsample_bytree" = 0.886,
   "scale_pos_weight" = 10,
   "gamma" = 0.5,
@@ -413,7 +381,7 @@ bst.cv <- xgb.cv(
   metrics = "rmse",
   nrounds = nround,
   nfold = 4,
-  early_stopping_rounds = 5
+  early_stopping_rounds = 20
 )
 
 # best nrounds
@@ -425,12 +393,11 @@ bst <- xgboost(
   metrics = "rmse",
   nrounds = best_iteration
 )
+pred_val <- predict(bst, as.matrix(x1))
 
-# calcluate sd
-pred_val <- predict(bst, data.matrix(x1))
-print(paste('validation error:', round(sd(pred_val - y1), 4), sep = ' '))
-
-# 0.5077
+# calcluate rmse
+val_rmse_xgb <- RMSE(pred_val,y1)
+print(paste('validation rmse error:', round(val_rmse_xgb, 4), sep = ' '))
 
 
 ## ---xgboost - full ----
@@ -443,37 +410,21 @@ x0$visit_date <- x0$air_store_id <- x0$visitors <- NULL
 x1$visit_date <- x1$air_store_id <- x1$visitors <- NULL
 
 
-# cross validation for full data
-folds <- createFolds(y0, k = 4)
-pre_cv <- data.frame(id = id)
-
-for(i in 1:4){  
-  traindata <- xgb.DMatrix(
-    data.matrix(x0[-folds[[i]],]),
-    lable = y0[-folds[[i]],]
-  )
-  
-  testdata <- xgb.DMatrix(
-    data.matrix(x0[folds[[i]],]),
-    lable = y0[folds[[i]],]
-  )  
-  
-  bst <- xgboost(
-    params = param,
-    data = traindata,
-    metrics = "rmse",
-    nrounds = best_iteration
-  )
-  
-  # predict testdata
-  pred_cv[,i] <- predict(bst,testdata)
-  
-}
+d0 <- xgb.DMatrix(
+  data.matrix(x0),
+  label = y0
+)
 
 
+bst <- xgboost(
+  params = param,
+  data = d0,
+  metrics = "rmse",
+  nrounds = best_iteration
+)
 
-
-
+# predict 
+pred_full <- predict(bst, data.matrix(x1))
 result_xgb <- data.frame(
   id = paste(xtest$air_store_id, x_test$visit_date , sep = '_'),
   visitors = expm1(pred_full)
@@ -483,8 +434,8 @@ result_xgb <- data.frame(
 library(lightgbm)
 
 ## lgbm - validation ----
-x0 <- x_train[visit_date <= '2017-03-09' & visit_date > '2016-04-01']
-x1 <- x_train[visit_date > '2017-03-09']
+x0 <- x_train[visit_date <= '2016-04-22' & visit_date >= '2016-01-01']
+x1 <- x_train[visit_date <= '2016-05-31' & visit_date >= '2016-04-29']
 
 
 # y0 trian vistors for vistors
@@ -494,15 +445,17 @@ y1 <- x1$visitors
 x0$visit_date <- x0$air_store_id <- x0$visitors <- NULL
 x1$visit_date <- x1$air_store_id <- x1$visitors <- NULL
 
-# cat_features <- c('air_genre_name', 'air_area_name')
+cat_features <- c('air_genre_name', 'air_area_name')
 d0 <- lgb.Dataset(
   as.matrix(x0),
   label = y0,
+  categorical_feature = cat_features,
   free_raw_data = TRUE
 )
 d1 <- lgb.Dataset(
   as.matrix(x1),
   label = y1,
+  categorical_feature = cat_features,
   free_raw_data = TRUE
 )
 
@@ -520,22 +473,27 @@ param <- list(
   weight = 'wgt'
 )
 
-ntrx <- 1000
+nround <- 1000
 valids <- list(valid = d1)
+
+# valid train
 model <- lgb.train(
   params = param,
   data = d0,
   valids = valids,
-  nrounds = ntrx,
+  nrounds = nround,
   early_stopping_rounds = 10
 )
 
+# BEST ITERATORS
+best_iteration <- model$best_iter
+
+
+# calcluate rmse
 pred_val <- predict(model, as.matrix(x1))
-print( paste('validation error:', round(sd(pred_val - y1),4), sep = ' ' ))
+val_rmse_lgbm <- RMSE(pred_val,y1)
+print(paste('validation rmsle error:', round(val_rmse_lgbm, 4),sep = ' '))
 
-# 0.5065
-
-ntrx <- model$best_iter
 
 ## ---lgbm - full ----
 
@@ -547,31 +505,115 @@ y0 <- x0$visitors
 x0$visit_date <- x0$air_store_id <- x0$visitors <- NULL
 x1$visit_date <- x1$air_store_id <- x1$visitors <- NULL
 
-# cat_features <- c('air_genre_name', 'air_area_name')
+cat_features <- c('air_genre_name', 'air_area_name')
 d0 <- lgb.Dataset(
   as.matrix(x0),
   label = y0,
+  categorical_feature = cat_features,
   free_raw_data = FALSE
 )
 
-
-model <- lgb.train(params = params,  data = d0, nrounds = ntrx)
-pred_full <- predict(model, as.matrix(x1))
+# full train model
+model <- lgb.train(
+  params = param,  
+  data = d0, 
+  nrounds = best_iteration
+)
+pred_ful <- predict(model, as.matrix(x1))
 
 # save submit data
 result_lightbgm <- data.frame(
   id = id,
-  visitors = expm1(pred_full)
+  visitors = expm1(pred_ful)
 )
 
 
+### ----------------------------- GBM MODEL -------------------------------
+library(gbm)
 
-# MERGE TWO MODEL PREDICT RESULT
+## gbm - validation ----
+x0 <- x_train[visit_date <= '2016-04-22' & visit_date >= '2016-01-01']
+x1 <- x_train[visit_date <= '2016-05-31' & visit_date >= '2016-04-29']
+
+
+# y0 trian vistors for vistors
+y0 <- x0$visitors
+y1 <- x1$visitors
+
+x0$visit_date <- x0$air_store_id <- NULL
+x1$visit_date <- x1$air_store_id <- x1$visitors <-  NULL
+
+
+# Validation TRAIN MODEL
+gbm_model <- gbm(
+  visitors ~ .,
+  data = x0,
+  distribution = "gaussian",
+  n.trees = 1000,
+  shrinkage = 0.05,
+  interaction.depth = 3,
+  bag.fraction = 0.5,
+  train.fraction = 0.5,
+  n.minobsinnode = 10,
+  cv.folds = 5,
+  keep.data = TRUE,
+  verbose = TRUE,
+  n.cores = 8
+)
+
+# check performance using 5-fold cross-validation
+best_iteration <- gbm.perf(gbm_model, method = "cv")
+print(best_iteration)
+
+# valid predict
+pred_val <- predict(gbm_model,x1,best_iteration)
+
+
+# calcluate rmse
+val_rmse_gbm <- RMSE(pred_val,y1)
+print(paste('validation rmse error:', round(val_rmse_gbm, 4),sep = ' '))
+
+
+## ---GBM - full ----
+x0 <- x_train
+x1 <- x_test
+
+x0$visit_date <- x0$air_store_id <- NULL
+x1$visit_date <- x1$air_store_id <- x1$visitors <-  NULL
+
+# FULL TRAIN MODEL
+gbm_model  <- gbm(
+  visitors ~ .,
+  data = x0,
+  distribution = "gaussian",
+  n.trees = 1000,
+  shrinkage = 0.05,
+  interaction.depth = 3,
+  bag.fraction = 0.5,
+  train.fraction = 0.5,
+  n.minobsinnode = 10,
+  cv.folds = 5,
+  keep.data = TRUE,
+  verbose = TRUE,
+  n.cores = 4
+)
+
+
+# PREDICT FULL
+pred_ful <- predict(gbm_model,x1,best_iteration)
+
+# SAVE RESULT
+result_gbm <- data.table(
+  id = id,
+  visitors = expm1(pred_ful)
+)
+
+
+# MERGE Three MODEL PREDICT RESULT
 result1 <- data.frame(
   id = id,
-  visitors = (result_xgb$visitors + result_lightbgm$visitors)/2
+  visitors = result_xgb$visitors * 0.35 + result_lightbgm$visitors * 0.35 
 )
-
 
 
 # ---------------------------- RandomForest Model ------------------------------
@@ -581,8 +623,6 @@ library(randomForest)
 x0 <- x_train[visit_date <= '2017-03-09' & visit_date > '2016-04-01']
 x1 <- x_train[visit_date > '2017-03-09']
 
-x0[,c(12:25) := NULL]
-x1[, c(12:25) := NULL]
 
 x0$visit_date <- x0$air_store_id <-  NULL
 x1$visit_date <- x1$air_store_id <- x1$visitors <- NULL
@@ -597,72 +637,6 @@ rf <- randomForest(
   proximity = FALSE, 
   ntree = 50
 )
-
-
-
-
-### -----------------------------KNN MODEL-------------------------------
-library(kknn)
-
-# DATA PREPAIRE
-x0 <- x_train
-x1 <- x_test
-
-x0$visit_date <- x0$air_store_id <- NULL
-x1$visit_date <- x1$air_store_id <- x1$visitors <-  NULL
-
-# TRAIN MODEL
-(knn.model <- train.kknn(
-  visitors ~ .,
-  data = x0,
-  kmax = 25,
-  kernel = c("rectangular", "triangular", "epanechnikov", "gaussian",  "rank", "optimal")
-))
-
-# PREDICT
-knn.fit <- predict(knn.model,x1)
-
-# SAVE RESULT
-result_knn <- data.table(
-  id = id,
-  visitors = expm1(knn.fit)
-)
-
-
-### -------------------------- STACK ENSEMBLE ---------------------------
-library(rpart)
-library(randomForest)
-library(caret)
-library(caretEnsemble)
-
-# validate data
-x0 <- x_train[visit_date <= '2017-03-09' & visit_date > '2016-04-01']
-x1 <- x_train[visit_date > '2017-03-09']
-
-# y0 -> train vistors,y1 -> validate vistors
-y0 <- x0$visitors
-y1 <- x1$visitors
-
-x0$visit_date <- x0$air_store_id <-  NULL
-x1$visit_date <- x1$air_store_id <- x1$visitors <- NULL
-
-
-my_control <- trainControl(
-  method = "repeatedcv",
-  number = 25,
-  savePredictions = "final",
-  allowParallel = T
-)
-
-model_list <- caretList(
-  visitors ~ .,
-  data = x0,
-  trControl = my_control,
-  methodList = c("glm", "rpart","rf")
-)
-
-p <- as.data.frame(predict(model_list, newdata = head(x1)))
-
 
 
 # ----------------------------- WEIGHT MEANS ----------------------------
@@ -759,8 +733,38 @@ write.csv(
   quote = F
 )
 
+
+
 # save data
 save.image("./output/save/mix_model_ensemble.RData")
 
 
-# 2017-12-26   (ensemble -- xgb and lightgm)
+# 2017-12-28   (ensemble -- xgb and lightgm)
+
+# --------------------------- Stack Ensemble ------------------------------
+#  validation for full data
+folds <- createFolds(y0, k = 4)
+pre_cv <- data.frame(id = id)
+
+for(i in 1:4){
+  traindata <- xgb.DMatrix(
+    data.matrix(x0[-folds[[i]],]),
+    lable = y0[-folds[[i]],]
+  )
+
+  testdata <- xgb.DMatrix(
+    data.matrix(x0[folds[[i]],]),
+    lable = y0[folds[[i]],]
+  )
+
+  bst <- xgboost(
+    params = param,
+    data = traindata,
+    metrics = "rmse",
+    nrounds = best_iteration
+  )
+
+  # predict testdata
+  pred_cv[,i] <- predict(bst,testdata)
+
+}

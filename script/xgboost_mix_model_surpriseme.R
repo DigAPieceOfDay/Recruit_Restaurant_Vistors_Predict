@@ -12,17 +12,17 @@ library(xgboost)
 xtrain <- fread('./data/air_visit_data.csv')
 xtest <- fread('./data/sample_submission.csv')
 
-## reservations: air clean ----
-reserve_air <- fread('./data/air_reserve.csv')
-
 ## store info: air ----
 xstore_air <- fread('./data/air_store_info.csv',encoding = "UTF-8")
 
-## reservations : hpg clean
-reserve_hpg <- fread("./data/hpg_reserve.csv")
+## reservations: air clean ----
+reserve_air <- fread('./data/air_reserve.csv')
 
 ## store info: hpg ----
 xstore_hpg <- fread('./data/hpg_store_info.csv',encoding = "UTF-8")
+
+## reservations : hpg clean
+reserve_hpg <- fread("./data/hpg_reserve.csv")
 
 ## date info ----
 xdate <- fread('./data/date_info.csv')
@@ -32,35 +32,58 @@ store_id <- fread("./data/store_id_relation.csv")
 
 
 ## weather data ---
-weather_station <- fread("./data/weather_info/weather_stations.csv")
 
-air_store_info_u <-
-  fread("./data/weather_info/air_store_info_with_nearest_station.csv",
-        encoding = "UTF-8")
+# staion_info 
+# weather_station <- fread("./data/weather_info/weather_stations.csv")
+# nearby_active_stations <- fread("./data/weather_info/nearby_active_stations.csv")
 
-hpg_store_info_u <-
-  fread("./data/weather_info/hpg_store_info_with_nearest_station.csv",
-        encoding = "UTF-8")
+# air_store nearest active station 
+# xstore_air_station <-
+#   fread("./data/weather_info/air_store_info_with_nearest_active_station.csv",
+#         encoding = "UTF-8")
 
-weater_files <- list.files(
-  path = "./data/weather_info/1-1-16_5-31-17_Weather_Translated",
-  pattern = "*.csv",
-  full.names = TRUE
-)
+# hpg_store nearest active station
+# xstore_hpg_station <-
+#   fread("./data/weather_info/hpg_store_info_with_nearest_active_station.csv",
+#         encoding = "UTF-8")
 
-weather_dt <- do.call(rbindlist, list(lapply(weater_files, fread)))
+# station weather_info 
+# weather_files <- list.files(
+#   path = "./data/weather_info/1-1-16_5-31-17_Weather_Translated",
+#   pattern = "*.csv",
+#   full.names = TRUE
+# )
+# 
+# weather_dt <- do.call(rbindlist, list(lapply(weather_files, fread)))
 
-
-
-
-
-
-
-
-
+# get file name
+# filename <- list.files(
+#   path = "./data/weather_info/1-1-16_5-31-17_Weather_Translated",
+#   pattern = "*.csv"
+# )
+# 
+# weather_dt$station_id <- gsub(".csv","",rep(filename, each = 517))
 
 
 # ---------------------------------DATA CLEAN------------------------------------
+# --- weather info clean ---
+# reorder colnames
+# weather_dt <- weather_dt[,c(16,1:15)]
+# 
+# # delete NA column
+# weather_dt[,c(5:6,9:15)] <- NULL
+# 
+# # convert to date
+# weather_dt$calendar_date <- as.Date(weather_dt$calendar_date)
+# 
+# # merge weather info and xstore_air
+# x <- right_join(
+#   weather_dt,
+#   xstore_air,
+#   by = "station_id"
+# )
+
+
 # merge reserve and store
 reserve_hpg <- merge(reserve_hpg, store_id)
 
@@ -101,6 +124,8 @@ reserve_air$reserve_datetime <- as.Date(reserve_air$visit_datetime)
 reserve_hpg$visit_date <- as.Date(reserve_hpg$visit_datetime)
 reserve_hpg$reserve_datetime <- as.Date(reserve_hpg$visit_datetime)
 
+
+
 # -----------------------------Feature Engenieer 1-------------------------------
 
 # from surprie me
@@ -128,6 +153,11 @@ xtrain$dow <- wday(xtrain$visit_date)
 xtrain$year <- year(xtrain$visit_date)
 xtrain$month <- month(xtrain$visit_date)
 
+# Calculate number of “restaurant days”
+xtrain$golden_diff <-
+  as.numeric(xtrain$visit_date - as.Date('2016-04-29', '%Y-%m-%d'))
+xtrain$golden_diff <- floor((xtrain$golden_diff + 700) / 7.0) - 100
+
 
 ### xtest data clean ----
 xtest$air_store_id <- str_sub(xtest$id, 1,-12)
@@ -138,6 +168,11 @@ xtest$dow <- wday(xtest$visit_date)
 xtest$year <- year(xtest$visit_date)
 xtest$month <- month(xtest$visit_date)
 
+xtest$golden_diff <- 
+  as.numeric(xtest$visit_date - as.Date('2017-04-29', '%Y-%m-%d'))
+xtest$golden_diff <- floor((xtest$golden_diff + 700) / 7.0) - 100
+
+
 unique_stores <- unique(xtest$air_store_id)
 stores <- data.frame(
   air_store_id = unique_stores,
@@ -146,44 +181,39 @@ stores <- data.frame(
 
 # stores data clean ----
 # sure it can be compressed...
-tmp <- xtrain[,.(min_vis = min(visitors)) ,by = list(air_store_id, dow)]
-stores <- merge(stores,tmp)
-
-tmp <- xtrain[,.(max_vis = max(visitors)) ,by = list(air_store_id, dow)]
-stores <- merge(stores,tmp)
-
-tmp <- xtrain[,.(mean_vis = mean(visitors)) ,by = list(air_store_id, dow)]
-stores <- merge(stores,tmp)
-
-tmp <- xtrain[,.(median_vis = median(visitors)) ,by = list(air_store_id, dow)]
-stores <- merge(stores,tmp)
-
-tmp <- xtrain[,.(sum_vis = sum(visitors)) ,by = list(air_store_id, dow)]
+tmp <- xtrain[,.(
+  min_vis = min(visitors),
+  max_vis = max(visitors),
+  mean_vis = mean(visitors),
+  median_vis = median(visitors)
+),
+by = list(air_store_id, dow)]
 stores <- merge(stores,tmp)
 
 # merge stores and store_air
 stores <- merge(stores,xstore_air)
 rm(tmp)
 
+
 # set air_genre_name/air_area_name to factor and then to interger
 stores$air_genre_name <- factor(stores$air_genre_name)
 levels(stores$air_genre_name) <- 1:nlevels(stores$air_genre_name)
+stores$air_genre_name <- as.integer(stores$air_genre_name)
 
 stores$air_area_name <- factor(stores$air_area_name)
 levels(stores$air_area_name) <- 1:nlevels(stores$air_area_name)
 stores$air_area_name <- as.integer(stores$air_area_name)
 
 # transform category var to dummy variable
-air_genre_name_dum <- dummy(stores$air_genre_name)
-stores$air_genre_name <- as.integer(stores$air_genre_name)
+# air_genre_name_dum <- dummy(stores$air_genre_name)
+# stores$air_genre_name <- as.integer(stores$air_genre_name)
 
 # air_area_name_dum <- dummy(stores$air_area_name)
 # stores$air_area_name <- as.integer(stores$air_area_name)
 
 # combine air_genre_name_dum、air_area_name_dum and stores
-stores <- data.table(cbind(stores,air_genre_name_dum))
-stores[, c("air_genre_name") := NULL]
-
+# stores <- data.table(cbind(stores,air_genre_name_dum))
+# stores[, c("air_genre_name") := NULL]
 # rm(air_genre_name_dum)
 
 ### date_info clean ---
@@ -195,7 +225,7 @@ wkend_holidays <- which(
 xdate[wkend_holidays, 'holiday_flg' := 0]
 
 # add decreasing weights from now
-xdate[, 'weight' := (.I/.N) ^ 7]
+# xdate[, 'weight' := (.I/.N) ^ 7]
 xdate$calendar_date <- as.Date(xdate$calendar_date)
 
 
@@ -230,25 +260,26 @@ train[,"var_max_long"] <- max(train$longitude) - train$longitude
 # NEW FEATURES FROM Georgii Vyshnia
 train[,"lon_plus_lat"] <- train$longitude + train$latitude
 
+train$air_store_id_int <- factor(train$air_area_name)
+levels(train$air_store_id_int) <- 1:nlevels(train$air_store_id_int)
+train$air_store_id_int <- as.integer(train$air_store_id_int)
+
 
 # COMPUTE DISTANCE BY LONGTITUDE/LATITUDE
 others <- cbind(train$longitude,train$latitude)
 center <- cbind(mean(train$longitude),mean(train$latitude))
-dist <- distm(others,center)
-train[,"dist"] <- dist
-
-# rm(others,center,dist)
+train$dist <- distm(others,center)
+rm(others,center)
 
 # it decreases the importance of the further past data by applying 
 # a weight to them
 train[, 'visitors':= log1p(visitors)]
-train[,.(visitors = weighted.mean(visitors, weight)), 
-      by = c('air_store_id', 'day_of_week', 'holiday_flg')]
+# train[,.(visitors = weighted.mean(visitors, weight)), 
+#       by = c('air_store_id', 'day_of_week', 'holiday_flg')]
 
 # delete day_of_week、weight
+# train[,weight := NULL]
 train[,day_of_week := NULL]
-train[,weight := NULL]
-
 
 ## -----------------------------Feature Engineer 2-------------------------------
 # from lightgbm fe and validation -like sliding window
@@ -371,27 +402,31 @@ x_test <- train[visitors == 0]
 
 
 
-# --------------------------------FEATURE SELECT---------------------------------
+# -------------------------------- FEATURE SELECT ---------------------------------
 library(Boruta)
 
 set.seed(10)
 borutaAttr <- Boruta(
-  visitors ~ . - (air_store_id + visit_date),
-  data = x_train,
+  visitors ~.,
+  data = x_train[,-c(1:2)],
   maxRuns = 20,
   doTrace = 0
 )
 
 borutaVars <- getSelectedAttributes(borutaAttr)
 boruta.formula <- formula(
-  paste("Survived ~ ",paste(borutaVars, collapse = " + "))
+  paste("visitors ~ ", paste(borutaVars, collapse = " + "))
 )
 
 
-# ----------------------------------- XGBOOST MODEL------------------------------
+# ----------------------------------- XGBOOST MODEL----------------------------------
 ## xgboost - validation ----
-x0 <- x_train[visit_date <= '2017-03-09' & visit_date > '2016-04-01']
-x1 <- x_train[visit_date > '2017-03-09']
+# x0 <- x_train[visit_date <= '2017-03-09' & visit_date > '2016-04-01']
+# x1 <- x_train[visit_date > '2017-03-09']
+
+x0 <- x_train[visit_date <= '2016-04-22' & visit_date >= '2016-01-01']
+x1 <- x_train[visit_date <= '2016-05-31' & visit_date >= '2016-04-29']
+
 
 # y0 -> train vistors,y1 -> validate vistors
 y0 <- x0$visitors
@@ -453,7 +488,13 @@ bst <- xgboost(
 pred_val <- predict(bst, data.matrix(x1))
 print(paste('validation error:', round(sd(pred_val - y1), 4), sep = ' '))
 
-# 2017-12-25 0.5073
+# calcluate rmsle
+pred_val <- predict(bst, as.matrix(x1))
+val_rmsle <- sqrt(
+  sum((log(pred_val+1)-log(y1+1))^2)/nrow(x1)
+)
+print(paste('validation rmsle error:', round(val_rmsle, 4),sep = ' '))
+
 
 ## ---xgboost - full ----
 x0 <- x_train
@@ -483,8 +524,6 @@ result1 <- data.frame(
   id = paste(xtest$air_store_id, x_test$visit_date , sep = '_'),
   visitors = expm1(pred_full)
 )
-
-
 
 
 # --------------------------------- WEIGHT MEANS -------------------------------
@@ -587,7 +626,8 @@ save.image("./output/save/xgboost_surpriseme.RData")
 
 # 2017-12-20 0.500 (add new feature -- longtitude and latitude)
 # 2017-12-22 0.501  (create dummy variable)
-
 # 2017-12-23 0.495 (new parameter)
 # 2017-12-24 0.494 (add new feature -- dist)
 # 2017-12-25 0.493 (new dummy variable strategy -- air_genre_name) 
+# 2017-12-26 0.490 (blend some results)
+# 2017-12-28 
