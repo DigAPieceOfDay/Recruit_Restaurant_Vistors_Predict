@@ -6,8 +6,6 @@ library(lubridate)
 library(dummies)
 library(geosphere)
 library(caret)
-library(xgboost)
-
 
 ## data: train and test ----
 xtrain <- fread('./data/air_visit_data.csv')
@@ -100,9 +98,9 @@ xtrain$year <- year(xtrain$visit_date)
 xtrain$month <- month(xtrain$visit_date)
 
 # Calculate number of “restaurant days”
-xtrain$golden_diff <-
-  as.numeric(xtrain$visit_date - as.Date('2016-04-29', '%Y-%m-%d'))
-xtrain$golden_diff <- floor((xtrain$golden_diff + 700) / 7.0) - 100
+# xtrain$golden_diff <-
+#   as.numeric(xtrain$visit_date - as.Date('2016-04-29', '%Y-%m-%d'))
+# xtrain$golden_diff <- floor((xtrain$golden_diff + 700) / 7.0) - 100
 
 
 ### xtest data clean ----
@@ -114,9 +112,9 @@ xtest$dow <- wday(xtest$visit_date)
 xtest$year <- year(xtest$visit_date)
 xtest$month <- month(xtest$visit_date)
 
-xtest$golden_diff <- 
-  as.numeric(xtest$visit_date - as.Date('2017-04-29', '%Y-%m-%d'))
-xtest$golden_diff <- floor((xtest$golden_diff + 700) / 7.0) - 100
+# xtest$golden_diff <- 
+#   as.numeric(xtest$visit_date - as.Date('2017-04-29', '%Y-%m-%d'))
+# xtest$golden_diff <- floor((xtest$golden_diff + 700) / 7.0) - 100
 
 unique_stores <- unique(xtest$air_store_id)
 stores <- data.frame(
@@ -159,7 +157,7 @@ wkend_holidays <- which(
 xdate[wkend_holidays, 'holiday_flg' := 0]
 
 # add decreasing weights from now
-# xdate[, 'weight' := (.I/.N) ^ 7]
+xdate[, 'weight' := (.I/.N) ^ 7]
 xdate$calendar_date <- as.Date(xdate$calendar_date)
 
 
@@ -182,14 +180,10 @@ train[, "total_reserv_dt_diff_mean" := (rs1 + rs2) / 2]
 train[, c("rs1", "rs2", "rv1", "rv2") := NULL]
 train <- train[order(air_store_id, visit_date)]
 
-# --- set na to 0 ---
-train[is.na(train)] <- 0
-
 # NEW FEATURES FROM JMBUL
 train[,"date_int"] <- as.integer(train$visit_date)
 train[,"var_max_lat"] <- max(train$latitude) - train$latitude
 train[,"var_max_long"] <- max(train$longitude) - train$longitude
-
 
 # NEW FEATURES FROM Georgii Vyshnia
 train[,"lon_plus_lat"] <- train$longitude + train$latitude
@@ -207,8 +201,15 @@ rm(others,center)
 # it decreases the importance of the further past data by applying 
 # a weight to them
 train[, 'visitors':= log1p(visitors)]
+train[,.(visitors = weighted.mean(visitors, weight)),
+      by = c('air_store_id', 'day_of_week', 'holiday_flg')]
+
+# delete day_of_week、weight
+train[,weight := NULL]
 train[,day_of_week := NULL]
 
+# --- set na to 0 ---
+train[is.na(train)] <- 0
 
 ## -----------------------------Feature Engineer 2-------------------------------
 # from lightgbm fe and validation like sliding window
@@ -330,6 +331,8 @@ x_train <- train[visitors > 0]
 x_test <- train[visitors == 0]
 
 # ----------------------------- XGBOOST MODEL-----------------------------
+library(xgboost)
+
 ## xgboost - validation ----
 
 # x0 <- x_train[visit_date <= '2016-04-22' & visit_date >= '2016-01-01']
@@ -358,15 +361,14 @@ d1 <- xgb.DMatrix(
 
 param <- list(
   "objective" = "reg:linear",
-  "eta" = 0.1,
+  "eta" = 0.05,
   "max_depth" = 8,
-  "subsample" = 0.886,
+  "subsample" = 0.8,
   'min_child_weight' = 10,
-  "colsample_bytree" = 0.886,
-  "scale_pos_weight" = 10,
+  "colsample_bytree" = 0.85,
   "gamma" = 0.5,
-  "alpha" = 10,
-  "lambda" = 300,
+  "alpha" = 1,
+  "lambda" = 0,
   "silent" = 1,
   "nthread" = 10,
   "seed" = 20171205
@@ -380,8 +382,8 @@ bst.cv <- xgb.cv(
   data = d0,
   metrics = "rmse",
   nrounds = nround,
-  nfold = 4,
-  early_stopping_rounds = 20
+  nfold = 5,
+  early_stopping_rounds = 10
 )
 
 # best nrounds
@@ -393,9 +395,9 @@ bst <- xgboost(
   metrics = "rmse",
   nrounds = best_iteration
 )
-pred_val <- predict(bst, as.matrix(x1))
 
 # calcluate rmse
+pred_val <- predict(bst, data.matrix(x1))
 val_rmse_xgb <- RMSE(pred_val,y1)
 print(paste('validation rmse error:', round(val_rmse_xgb, 4), sep = ' '))
 
@@ -416,26 +418,39 @@ d0 <- xgb.DMatrix(
 )
 
 
-bst <- xgboost(
-  params = param,
-  data = d0,
-  metrics = "rmse",
-  nrounds = best_iteration
-)
+# Set i=2 because the first column is for the id variable
+i = 2
+solution_xgb <- data.frame(id = id)
 
-# predict 
-pred_full <- predict(bst, data.matrix(x1))
+# cross validation for full data
+for (i in 2:6) {
+  set.seed(i)
+  bst <- xgboost(
+    params = param,
+    data = d0,
+    metrics = "rmse",
+    nrounds = best_iteration
+  )
+  pred_ful <- predict(bst, data.matrix(x1))
+  solution_xgb[, i] <- pred_ful
+  
+}
+
+# Count the mean of visitors for all solution 
+pred_ful <- apply(solution_xgb[,-1], MARGIN = 1, mean)
+
+# PREDICT FULL
 result_xgb <- data.frame(
-  id = paste(xtest$air_store_id, x_test$visit_date , sep = '_'),
-  visitors = expm1(pred_full)
+  id = id,
+  visitors = expm1(pred_ful)
 )
 
 # --------------------------- Lightgbm Model ------------------------------
 library(lightgbm)
 
 ## lgbm - validation ----
-x0 <- x_train[visit_date <= '2016-04-22' & visit_date >= '2016-01-01']
-x1 <- x_train[visit_date <= '2016-05-31' & visit_date >= '2016-04-29']
+x0 <- x_train[visit_date <= '2017-03-09' & visit_date > '2016-04-01']
+x1 <- x_train[visit_date > '2017-03-09']
 
 
 # y0 trian vistors for vistors
@@ -477,20 +492,21 @@ nround <- 1000
 valids <- list(valid = d1)
 
 # valid train
-model <- lgb.train(
+lgb_cv <- lgb.train(
   params = param,
   data = d0,
   valids = valids,
   nrounds = nround,
+  nfold = 4,
   early_stopping_rounds = 10
 )
 
 # BEST ITERATORS
-best_iteration <- model$best_iter
+best_iteration <- lgb_cv$best_iter
 
 
 # calcluate rmse
-pred_val <- predict(model, as.matrix(x1))
+pred_val <- predict(lgb_cv, as.matrix(x1))
 val_rmse_lgbm <- RMSE(pred_val,y1)
 print(paste('validation rmsle error:', round(val_rmse_lgbm, 4),sep = ' '))
 
@@ -513,13 +529,23 @@ d0 <- lgb.Dataset(
   free_raw_data = FALSE
 )
 
-# full train model
-model <- lgb.train(
-  params = param,  
-  data = d0, 
-  nrounds = best_iteration
-)
-pred_ful <- predict(model, as.matrix(x1))
+# cross validation for full data
+solution_lightgbm <- data.frame(id = id)
+
+for (i in 2:6) {
+  set.seed(i)
+  lgb <- lgb.train(
+    params = param,  
+    data = d0, 
+    nrounds = best_iteration
+  )
+  pred_ful <- predict(lgb, as.matrix(x1))
+  solution_lightgbm[, i] <- pred_ful
+  
+}
+
+# Count the mean of visitors for all solution 
+pred_ful <- apply(solution_lightgbm[,-1], MARGIN = 1, mean)
 
 # save submit data
 result_lightbgm <- data.frame(
@@ -532,9 +558,8 @@ result_lightbgm <- data.frame(
 library(gbm)
 
 ## gbm - validation ----
-x0 <- x_train[visit_date <= '2016-04-22' & visit_date >= '2016-01-01']
-x1 <- x_train[visit_date <= '2016-05-31' & visit_date >= '2016-04-29']
-
+x0 <- x_train[visit_date <= '2017-03-09' & visit_date > '2016-04-01']
+x1 <- x_train[visit_date > '2017-03-09']
 
 # y0 trian vistors for vistors
 y0 <- x0$visitors
@@ -609,20 +634,16 @@ result_gbm <- data.table(
 )
 
 
-# MERGE Three MODEL PREDICT RESULT
-result1 <- data.frame(
-  id = id,
-  visitors = result_xgb$visitors * 0.35 + result_lightbgm$visitors * 0.35 
-)
-
-
-# ---------------------------- RandomForest Model ------------------------------
-library(randomForest)
+# ------------------------------- KNN Model ------------------------------
+library(kknn)
 
 ## randomforest - validation ----
 x0 <- x_train[visit_date <= '2017-03-09' & visit_date > '2016-04-01']
 x1 <- x_train[visit_date > '2017-03-09']
 
+# y0 trian vistors for vistors
+y0 <- x0$visitors
+y1 <- x1$visitors
 
 x0$visit_date <- x0$air_store_id <-  NULL
 x1$visit_date <- x1$air_store_id <- x1$visitors <- NULL
@@ -630,12 +651,61 @@ x1$visit_date <- x1$air_store_id <- x1$visitors <- NULL
 # set seed for keeping result same
 set.seed(20171226)
 
-rf <- randomForest(
+# Validation TRAIN MODEL
+knn_model <- train.kknn(
   visitors ~.,
-  data = x0,
-  importance = TRUE, 
-  proximity = FALSE, 
-  ntree = 50
+  x0,
+  kcv = 4,
+  kmax = 15,
+  distance = 1,
+  kernel = "optimal"
+)
+
+# valid predict
+pred_val <- predict(knn_model,x1)
+
+# calcluate rmse
+val_rmse_knn <- RMSE(pred_val,y1)
+print(paste('validation rmse error:', round(val_rmse_knn, 4),sep = ' '))
+
+
+## ---GBM - full ----
+x0 <- x_train
+x1 <- x_test
+
+x0$visit_date <- x0$air_store_id <- NULL
+x1$visit_date <- x1$air_store_id <- x1$visitors <-  NULL
+
+knn_model <- train.kknn(
+  visitors ~.,
+  x0,
+  kmax = 15,
+  distance = 1,
+  kernel = "optimal"
+)
+
+# full predict
+pred_val <- predict(knn_model,x1)
+
+result_knn <- data.table(
+  id = id,
+  visitors = expm1()
+)
+
+
+# MERGE Three MODEL PREDICT RESULT
+result1 <- data.frame(
+  id = id,
+  visitors = result_xgb$visitors * 0.6 + result_lightbgm$visitors * 0.4
+)
+
+
+# Create csv submission file
+write.csv(
+  result1,
+  paste0("./output/submission/xgb_lgb",".csv"), 
+  row.names = FALSE,
+  quote = F
 )
 
 
@@ -713,33 +783,50 @@ result2 <- sample_submission[,c("id","visitors")]
 result2 <- result2[order(result2$id),]
 
 # remove temp variable
-rm(visitors,visit_data,sample_submission)
+rm(air_visit_data,visitors,visit_data,sample_submission)
 
 # ---------------------------- MERGE RESULT -----------------------------
 # merge solution1 and solution2
-sample_submission_last <- data.table(
+blend_result1 <- data.table(
   id = id,
-  vis1 = result1$visitors,
-  vis2 = result2$visitors
+  visitors = result1$visitors*0.6 + result2$visitors*0.4*1.1
 )
-sample_submission_last[, "visitors" := (vis1 + vis2 * 1.1) / 2]
-sample_submission_last[, c("vis1", "vis2") := NULL]
+
+# Blend surprise2 result
+surprise2 <- fread(
+  "./output/blend/sample/submission_surprise2.csv"
+)
+
+sample_submission <- data.table(
+  id = id,
+  visitors = blend_result1$visitors*0.4 + surprise2$visitors*0.6
+)
+
 
 # Create csv submission file
 write.csv(
-  sample_submission_last,
+  sample_submission,
   paste0("./output/submission/mix_ensemble_",Sys.Date(),".csv"), 
   row.names = FALSE,
   quote = F
 )
 
 
-
 # save data
 save.image("./output/save/mix_model_ensemble.RData")
 
 
-# 2017-12-28   (ensemble -- xgb and lightgm)
+# 2017-12-30  0.485 (ensemble -- xgb、lightgm and surprise2)
+
+
+
+
+
+
+
+
+
+
 
 # --------------------------- Stack Ensemble ------------------------------
 #  validation for full data
